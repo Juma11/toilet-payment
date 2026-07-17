@@ -443,6 +443,17 @@ app.post("/nfc/validate", requireSiteKey(pool), async (req, res) => {
   }
 });
 
+app.get("/site-info", requireSiteKey(pool), async (req, res) => {
+  try {
+    const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1", [req.site.id]);
+    const doors = doorsResult.rows.reduce((acc, d) => ({ ...acc, [d.door_key]: d.price_kes }), {});
+    res.json({ name: req.site.name, doors });
+  } catch (err) {
+    console.error("Site info error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 app.get("/transactions", requireSiteKey(pool), async (req, res) => {
   try {
     const result = await pool.query(
