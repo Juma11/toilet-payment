@@ -9,6 +9,7 @@
  * (in-memory state is lost on restart, and won't work if you run >1 server instance).
  */
 
+require("dotenv").config();
 const express = require("express");
 const crypto = require("crypto");
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
