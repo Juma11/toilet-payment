@@ -1,0 +1,18 @@
+{
+  "name": "toilet-payment-server",
+  "version": "2.0.0",
+  "description": "Multi-tenant backend for public toilet M-Pesa (Paystack) payment + OTP/NFC door unlock system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.12.0"
+  }
+}
