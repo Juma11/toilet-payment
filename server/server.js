@@ -352,7 +352,13 @@ app.post("/charge", requireSiteKey(pool), async (req, res) => {
 });
 
 app.post("/paystack/webhook", express.json(), async (req, res) => {
-  // TODO before going live: verify x-paystack-signature against PAYSTACK_SECRET_KEY (see docs).
+  const signature = req.headers["x-paystack-signature"];
+  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(JSON.stringify(req.body)).digest("hex");
+  if (hash !== signature) {
+    console.warn("Webhook signature mismatch — rejecting");
+    return res.sendStatus(401);
+  }
+
   const event = req.body;
 
   if (event.event === "charge.success") {
@@ -434,6 +440,22 @@ app.post("/nfc/validate", requireSiteKey(pool), async (req, res) => {
   } catch (err) {
     console.error("NFC validate error:", err);
     res.status(500).json({ valid: false, reason: "Internal error" });
+  }
+});
+
+app.get("/transactions", requireSiteKey(pool), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT t.reference, d.door_key, t.phone, t.status, t.otp, t.otp_expires_at, t.used, t.created_at
+       FROM transactions t JOIN doors d ON d.id = t.door_id
+       WHERE t.site_id = $1
+       ORDER BY t.created_at DESC LIMIT 50`,
+      [req.site.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("List transactions error:", err);
+    res.status(500).json({ error: "Internal error" });
   }
 });
 
