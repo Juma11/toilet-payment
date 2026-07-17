@@ -47,6 +47,23 @@ function generateReference() {
   return "toilet_" + crypto.randomBytes(8).toString("hex");
 }
 
+// Paystack requires Kenyan numbers as +254XXXXXXXXX.
+// Accepts 07XXXXXXXX, 7XXXXXXXX, 254XXXXXXXXX, or +254XXXXXXXXX and normalizes to +254XXXXXXXXX.
+function normalizeKenyanPhone(raw) {
+  const digits = raw.replace(/[^\d]/g, ""); // strip spaces, +, dashes etc.
+
+  if (digits.length === 12 && digits.startsWith("254")) {
+    return "+" + digits; // 254768406807 -> +254768406807
+  }
+  if (digits.length === 10 && digits.startsWith("0")) {
+    return "+254" + digits.slice(1); // 0768406807 -> +254768406807
+  }
+  if (digits.length === 9) {
+    return "+254" + digits; // 768406807 -> +254768406807
+  }
+  return null; // couldn't confidently normalize
+}
+
 // Stub — replace with Africa's Talking / Twilio / your SMS gateway of choice
 async function sendSms(phone, message) {
   console.log(`[SMS -> ${phone}]: ${message}`);
@@ -64,6 +81,11 @@ app.post("/charge", async (req, res) => {
     return res.status(400).json({ error: `Unknown doorId. Valid: ${Object.keys(DOOR_PRICE_KES).join(", ")}` });
   }
 
+  const normalizedPhone = normalizeKenyanPhone(phone);
+  if (!normalizedPhone) {
+    return res.status(400).json({ error: "Could not parse phone number. Use format 07XXXXXXXX or +254XXXXXXXXX." });
+  }
+
   const amount = DOOR_PRICE_KES[doorId];
   const reference = generateReference();
 
@@ -75,12 +97,12 @@ app.post("/charge", async (req, res) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        email: email || `${phone}@toilet.local`, // Paystack requires an email field
-        amount: amount * 100, // Paystack expects amount in kobo/cents equivalent (lowest unit)
+        email: email || "info@vintechafrica.com", // Paystack requires a valid-looking email
+        amount: amount * 100,
         currency: "KES",
         reference,
         mobile_money: {
-          phone,
+          phone: normalizedPhone,
           provider: "mpesa",
         },
       }),
@@ -92,9 +114,8 @@ app.post("/charge", async (req, res) => {
       return res.status(400).json({ error: data.message || "Charge initiation failed" });
     }
 
-    // Record a pending transaction so the webhook has something to update
     transactions.set(reference, {
-      phone,
+      phone: normalizedPhone,
       doorId,
       status: "pending",
       otp: null,
@@ -105,7 +126,7 @@ app.post("/charge", async (req, res) => {
     return res.json({
       message: "STK push sent. Ask the customer to enter their M-Pesa PIN.",
       reference,
-      paystackStatus: data.data.status, // e.g. "send_otp", "pay_offline", "pending"
+      paystackStatus: data.data.status,
     });
   } catch (err) {
     console.error("Charge error:", err);
@@ -128,7 +149,7 @@ app.post("/paystack/webhook", async (req, res) => {
 
     if (!tx) {
       console.warn(`Webhook for unknown reference: ${reference}`);
-      return res.sendStatus(200); // ack anyway so Paystack doesn't retry forever
+      return res.sendStatus(200);
     }
 
     const otp = generateOtp();
@@ -154,7 +175,6 @@ app.post("/validate", (req, res) => {
     return res.status(400).json({ valid: false, reason: "doorId and otp required" });
   }
 
-  // Find a matching, unused, unexpired transaction for this door
   const match = [...transactions.entries()].find(
     ([, tx]) => tx.doorId === doorId && tx.otp === otp && !tx.used
   );
@@ -173,6 +193,11 @@ app.post("/validate", (req, res) => {
   transactions.set(reference, tx);
 
   return res.json({ valid: true, reference });
+});
+
+// ---- Debug: list transactions (remove before going live) ----
+app.get("/debug/transactions", (req, res) => {
+  res.json([...transactions.entries()].map(([ref, tx]) => ({ reference: ref, ...tx })));
 });
 
 // ---- Health check ----
