@@ -56,7 +56,7 @@ app.use(express.json({
 }));
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const OTP_EXPIRY_MS = 10 * 60 * 1000;
+const OTP_EXPIRY_MS = 60 * 60 * 1000; // 60 min — enough time for someone paying remotely to travel and arrive
 const OTP_LENGTH = 6;
 
 // ---- Helpers ----
@@ -799,6 +799,33 @@ app.get("/public/transactions/:reference", async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error("Public transaction status error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// Targeted lookup only — requires the phone number the customer themselves
+// gives, unlike a browsable list. Safe for reception to use even though
+// it's site-key (not login) authenticated, since a stranger would need to
+// already know the exact phone number to retrieve anything.
+app.get("/transactions/lookup", requireSiteKey(pool), async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) return res.status(400).json({ error: "phone is required" });
+
+  const normalizedPhone = normalizeKenyanPhone(phone);
+  if (!normalizedPhone) return res.status(400).json({ error: "Could not parse phone number" });
+
+  try {
+    const result = await pool.query(
+      `SELECT t.reference, d.door_key, t.status, t.otp, t.otp_expires_at, t.used, t.created_at
+       FROM transactions t JOIN doors d ON d.id = t.door_id
+       WHERE t.site_id = $1 AND t.phone = $2 AND t.created_at > now() - interval '24 hours'
+       ORDER BY t.created_at DESC
+       LIMIT 10`,
+      [req.site.id, normalizedPhone]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Phone lookup error:", err);
     res.status(500).json({ error: "Internal error" });
   }
 });
