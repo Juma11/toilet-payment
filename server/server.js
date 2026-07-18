@@ -51,7 +51,9 @@ const {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 const OTP_EXPIRY_MS = 10 * 60 * 1000;
@@ -423,9 +425,9 @@ app.post("/charge", requireSiteKey(pool), async (req, res) => {
   }
 });
 
-app.post("/paystack/webhook", express.json(), async (req, res) => {
+app.post("/paystack/webhook", async (req, res) => {
   const signature = req.headers["x-paystack-signature"];
-  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(JSON.stringify(req.body)).digest("hex");
+  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(req.rawBody).digest("hex");
   if (hash !== signature) {
     console.warn("Webhook signature mismatch — rejecting");
     return res.sendStatus(401);
