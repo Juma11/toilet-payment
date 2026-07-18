@@ -193,6 +193,53 @@ app.post("/sites", requireAuth, async (req, res) => {
   }
 });
 
+app.patch("/sites/:id", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  const siteId = parseInt(req.params.id, 10);
+  const { name, doors } = req.body;
+
+  const client = await pool.connect();
+  try {
+    // Confirm the site belongs to this client (or, for super admin with no clientId filter, any site)
+    const ownCheck = await client.query(
+      "SELECT * FROM sites WHERE id = $1 AND ($2::int IS NULL OR client_id = $2)",
+      [siteId, clientId]
+    );
+    if (ownCheck.rows.length === 0) return res.status(404).json({ error: "Site not found" });
+
+    await client.query("BEGIN");
+
+    if (name) {
+      await client.query("UPDATE sites SET name = $1 WHERE id = $2", [name, siteId]);
+    }
+
+    if (doors && typeof doors === "object") {
+      for (const [doorKey, price] of Object.entries(doors)) {
+        await client.query(
+          `INSERT INTO doors (site_id, door_key, price_kes) VALUES ($1, $2, $3)
+           ON CONFLICT (site_id, door_key) DO UPDATE SET price_kes = $3`,
+          [siteId, doorKey, price]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+
+    const updated = await pool.query("SELECT * FROM sites WHERE id = $1", [siteId]);
+    const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1", [siteId]);
+    res.json({
+      ...updated.rows[0],
+      doors: doorsResult.rows.reduce((acc, d) => ({ ...acc, [d.door_key]: d.price_kes }), {}),
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Update site error:", err);
+    res.status(500).json({ error: "Internal error" });
+  } finally {
+    client.release();
+  }
+});
+
 app.get("/sites", requireAuth, async (req, res) => {
   const clientId = resolveClientId(req);
 
@@ -342,8 +389,8 @@ app.post("/charge", requireSiteKey(pool), async (req, res) => {
     }
 
     await pool.query(
-      "INSERT INTO transactions (reference, site_id, door_id, phone, status) VALUES ($1, $2, $3, $4, 'pending')",
-      [reference, site.id, door.id, normalizedPhone]
+      "INSERT INTO transactions (reference, site_id, door_id, phone, amount_kes, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+      [reference, site.id, door.id, normalizedPhone, door.price_kes]
     );
 
     res.json({ message: "STK push sent", reference, paystackStatus: data.data.status });
@@ -468,6 +515,60 @@ app.get("/transactions", requireSiteKey(pool), async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error("List transactions error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/finance/summary", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  try {
+    const result = await pool.query(
+      `SELECT s.id AS site_id, s.name AS site_name,
+              COALESCE(SUM(t.amount_kes) FILTER (WHERE t.status = 'paid'), 0) AS revenue_kes,
+              COUNT(*) FILTER (WHERE t.status = 'paid') AS paid_count,
+              COUNT(*) FILTER (WHERE t.status = 'pending') AS pending_count
+       FROM sites s
+       LEFT JOIN transactions t ON t.site_id = s.id
+       WHERE ($1::int IS NULL OR s.client_id = $1)
+       GROUP BY s.id, s.name
+       ORDER BY revenue_kes DESC`,
+      [clientId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Finance summary error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/admin-transactions", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  const { siteId, status, phone, dateFrom, dateTo } = req.query;
+
+  const conditions = ["($1::int IS NULL OR s.client_id = $1)"];
+  const params = [clientId];
+
+  if (siteId) { params.push(siteId); conditions.push(`t.site_id = $${params.length}`); }
+  if (status) { params.push(status); conditions.push(`t.status = $${params.length}`); }
+  if (phone) { params.push(`%${phone}%`); conditions.push(`t.phone ILIKE $${params.length}`); }
+  if (dateFrom) { params.push(dateFrom); conditions.push(`t.created_at >= $${params.length}`); }
+  if (dateTo) { params.push(dateTo); conditions.push(`t.created_at <= $${params.length}`); }
+
+  try {
+    const result = await pool.query(
+      `SELECT t.reference, s.name AS site_name, d.door_key, t.phone, t.amount_kes,
+              t.status, t.used, t.created_at
+       FROM transactions t
+       JOIN sites s ON s.id = t.site_id
+       JOIN doors d ON d.id = t.door_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY t.created_at DESC
+       LIMIT 200`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Admin transactions search error:", err);
     res.status(500).json({ error: "Internal error" });
   }
 });
