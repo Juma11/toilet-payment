@@ -806,4 +806,47 @@ app.get("/public/transactions/:reference", async (req, res) => {
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3001;
+// =====================================================================
+// FALLBACK: poll Paystack directly for pending transactions
+// Doesn't rely on the webhook arriving at all — asks Paystack "did this
+// succeed?" using the same secret key already in .env. Catches payments
+// that succeeded but whose webhook never reached us for any reason.
+// =====================================================================
+async function pollPendingTransactions() {
+  try {
+    const pending = await pool.query(
+      `SELECT * FROM transactions
+       WHERE status = 'pending' AND created_at > now() - interval '30 minutes'`
+    );
+
+    for (const tx of pending.rows) {
+      try {
+        const verifyRes = await fetch(`https://api.paystack.co/transaction/verify/${tx.reference}`, {
+          headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+        });
+        const data = await verifyRes.json();
+
+        if (data.status && data.data && data.data.status === "success") {
+          const otp = generateOtp();
+          const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
+
+          await pool.query(
+            "UPDATE transactions SET status = 'paid', otp = $1, otp_expires_at = $2 WHERE id = $3",
+            [otp, expiresAt, tx.id]
+          );
+
+          await sendSms(tx.phone, `Payment received. Your toilet access code is ${otp}. Valid for 10 minutes.`);
+          console.log(`[poll] Reference ${tx.reference} confirmed paid via Paystack verify. Code: ${otp}`);
+        }
+      } catch (err) {
+        console.error(`[poll] Verify failed for ${tx.reference}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error("[poll] Error checking pending transactions:", err.message);
+  }
+}
+
+setInterval(pollPendingTransactions, 20000); // check every 20 seconds
+
 app.listen(PORT, () => console.log(`Toilet payment server running on port ${PORT}`));
