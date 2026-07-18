@@ -523,6 +523,34 @@ app.post("/nfc/validate", requireSiteKey(pool), async (req, res) => {
   }
 });
 
+// Door units poll this periodically (every 30-60s) to keep a local cache of
+// currently valid codes/tags, so a brief WiFi drop doesn't strand a paying
+// customer at the door — the ESP32 falls back to this cache if the live
+// /validate or /nfc/validate call times out.
+app.get("/site-sync", requireSiteKey(pool), async (req, res) => {
+  try {
+    const otpResult = await pool.query(
+      `SELECT d.door_key, t.otp, t.otp_expires_at
+       FROM transactions t JOIN doors d ON d.id = t.door_id
+       WHERE t.site_id = $1 AND t.status = 'paid' AND t.used = false AND t.otp_expires_at > now()`,
+      [req.site.id]
+    );
+    const tagResult = await pool.query(
+      `SELECT nt.uid, nt.name FROM nfc_tags nt
+       JOIN nfc_tag_sites nts ON nts.tag_id = nt.id
+       WHERE nts.site_id = $1 AND nt.active = true`,
+      [req.site.id]
+    );
+    res.json({
+      otps: otpResult.rows.map((r) => ({ doorKey: r.door_key, otp: r.otp, expiresAt: r.otp_expires_at })),
+      tags: tagResult.rows.map((r) => ({ uid: r.uid, name: r.name })),
+    });
+  } catch (err) {
+    console.error("Site sync error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 app.get("/site-info", requireSiteKey(pool), async (req, res) => {
   try {
     const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1 AND active = true", [req.site.id]);
