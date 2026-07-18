@@ -196,7 +196,7 @@ app.post("/sites", requireAuth, async (req, res) => {
 app.patch("/sites/:id", requireAuth, async (req, res) => {
   const clientId = resolveClientId(req);
   const siteId = parseInt(req.params.id, 10);
-  const { name, doors } = req.body;
+  const { name, doors, removeDoors } = req.body;
 
   const client = await pool.connect();
   try {
@@ -216,9 +216,18 @@ app.patch("/sites/:id", requireAuth, async (req, res) => {
     if (doors && typeof doors === "object") {
       for (const [doorKey, price] of Object.entries(doors)) {
         await client.query(
-          `INSERT INTO doors (site_id, door_key, price_kes) VALUES ($1, $2, $3)
-           ON CONFLICT (site_id, door_key) DO UPDATE SET price_kes = $3`,
+          `INSERT INTO doors (site_id, door_key, price_kes, active) VALUES ($1, $2, $3, true)
+           ON CONFLICT (site_id, door_key) DO UPDATE SET price_kes = $3, active = true`,
           [siteId, doorKey, price]
+        );
+      }
+    }
+
+    if (Array.isArray(removeDoors)) {
+      for (const doorKey of removeDoors) {
+        await client.query(
+          "UPDATE doors SET active = false WHERE site_id = $1 AND door_key = $2",
+          [siteId, doorKey]
         );
       }
     }
@@ -226,7 +235,7 @@ app.patch("/sites/:id", requireAuth, async (req, res) => {
     await client.query("COMMIT");
 
     const updated = await pool.query("SELECT * FROM sites WHERE id = $1", [siteId]);
-    const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1", [siteId]);
+    const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1 AND active = true", [siteId]);
     res.json({
       ...updated.rows[0],
       doors: doorsResult.rows.reduce((acc, d) => ({ ...acc, [d.door_key]: d.price_kes }), {}),
@@ -250,7 +259,7 @@ app.get("/sites", requireAuth, async (req, res) => {
 
     const sites = sitesResult.rows;
     for (const site of sites) {
-      const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1", [site.id]);
+      const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1 AND active = true", [site.id]);
       site.doors = doorsResult.rows.reduce((acc, d) => ({ ...acc, [d.door_key]: d.price_kes }), {});
     }
     res.json(sites);
@@ -365,7 +374,7 @@ app.post("/charge", requireSiteKey(pool), async (req, res) => {
   }
 
   try {
-    const doorResult = await pool.query("SELECT * FROM doors WHERE site_id = $1 AND door_key = $2", [site.id, doorKey]);
+    const doorResult = await pool.query("SELECT * FROM doors WHERE site_id = $1 AND door_key = $2 AND active = true", [site.id, doorKey]);
     const door = doorResult.rows[0];
     if (!door) return res.status(400).json({ error: `Unknown doorKey '${doorKey}' for this site` });
 
@@ -494,7 +503,7 @@ app.post("/nfc/validate", requireSiteKey(pool), async (req, res) => {
 
 app.get("/site-info", requireSiteKey(pool), async (req, res) => {
   try {
-    const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1", [req.site.id]);
+    const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1 AND active = true", [req.site.id]);
     const doors = doorsResult.rows.reduce((acc, d) => ({ ...acc, [d.door_key]: d.price_kes }), {});
     res.json({ name: req.site.name, doors });
   } catch (err) {
