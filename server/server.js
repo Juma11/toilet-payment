@@ -97,21 +97,35 @@ app.post("/auth/login", async (req, res) => {
   }
 
   try {
-    const result = await pool.query("SELECT * FROM clients WHERE email = $1", [email]);
-    const client = result.rows[0];
+    // Check the main clients table first (super admins and client owners)
+    const clientResult = await pool.query("SELECT * FROM clients WHERE email = $1", [email]);
+    const client = clientResult.rows[0];
 
-    if (!client || !(await comparePassword(password, client.password_hash))) {
-      return res.status(401).json({ error: "Invalid email or password" });
+    if (client && (await comparePassword(password, client.password_hash))) {
+      const token = signToken({
+        id: client.id,
+        role: client.role,
+        clientId: client.role === "super_admin" ? null : client.id,
+        name: client.name,
+      });
+      return res.json({ token, role: client.role, name: client.name });
     }
 
-    const token = signToken({
-      id: client.id,
-      role: client.role,
-      clientId: client.role === "super_admin" ? null : client.id,
-      name: client.name,
-    });
+    // Fall back to staff logins
+    const staffResult = await pool.query("SELECT * FROM client_staff WHERE email = $1 AND active = true", [email]);
+    const staff = staffResult.rows[0];
 
-    res.json({ token, role: client.role, name: client.name });
+    if (staff && (await comparePassword(password, staff.password_hash))) {
+      const token = signToken({
+        id: staff.id,
+        role: "client_staff",
+        clientId: staff.client_id,
+        name: staff.name,
+      });
+      return res.json({ token, role: "client_staff", name: staff.name });
+    }
+
+    return res.status(401).json({ error: "Invalid email or password" });
   } catch (err) {
     console.error("Login error:", err);
     res.status(500).json({ error: "Internal error" });
@@ -578,6 +592,64 @@ app.get("/admin-transactions", requireAuth, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error("Admin transactions search error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// =====================================================================
+// CLIENT-SCOPED: staff logins (added by the client owner, or by super admin on their behalf)
+// =====================================================================
+
+app.post("/staff", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  if (!clientId) return res.status(400).json({ error: "clientId is required (super admin: pass ?clientId=)" });
+
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: "name, email and password are required" });
+  }
+
+  try {
+    const passwordHash = await hashPassword(password);
+    const result = await pool.query(
+      "INSERT INTO client_staff (client_id, name, email, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, name, email, active, created_at",
+      [clientId, name, email, passwordHash]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === "23505") return res.status(409).json({ error: "Email already in use" });
+    console.error("Create staff error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/staff", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  if (!clientId) return res.status(400).json({ error: "clientId is required (super admin: pass ?clientId=)" });
+
+  try {
+    const result = await pool.query(
+      "SELECT id, name, email, active, created_at FROM client_staff WHERE client_id = $1 ORDER BY created_at DESC",
+      [clientId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("List staff error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.delete("/staff/:id", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  try {
+    const result = await pool.query(
+      "UPDATE client_staff SET active = false WHERE id = $1 AND ($2::int IS NULL OR client_id = $2) RETURNING id",
+      [req.params.id, clientId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Staff account not found" });
+    res.json({ message: "Staff account deactivated" });
+  } catch (err) {
+    console.error("Deactivate staff error:", err);
     res.status(500).json({ error: "Internal error" });
   }
 });
