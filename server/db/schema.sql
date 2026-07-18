@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS sites (
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   site_key TEXT UNIQUE NOT NULL,
+  address TEXT,
+  latitude DOUBLE PRECISION,
+  longitude DOUBLE PRECISION,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
