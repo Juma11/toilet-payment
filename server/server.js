@@ -678,17 +678,16 @@ app.get("/public/sites/nearby", async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT id, name, address, latitude, longitude,
-              (6371 * acos(
-                 LEAST(1, cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2))
-                 + sin(radians($1)) * sin(radians(latitude)))
-              )) AS distance_km
-       FROM sites
-       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-       HAVING (6371 * acos(
-                 LEAST(1, cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2))
-                 + sin(radians($1)) * sin(radians(latitude)))
-              )) <= $3
+      `SELECT * FROM (
+         SELECT id, name, address, latitude, longitude,
+                (6371 * acos(
+                   LEAST(1, cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2))
+                   + sin(radians($1)) * sin(radians(latitude)))
+                )) AS distance_km
+         FROM sites
+         WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+       ) sub
+       WHERE distance_km <= $3
        ORDER BY distance_km ASC
        LIMIT 50`,
       [lat, lng, radiusKm]
