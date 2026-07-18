@@ -24,8 +24,9 @@ CREATE TABLE IF NOT EXISTS sites (
 CREATE TABLE IF NOT EXISTS doors (
   id SERIAL PRIMARY KEY,
   site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-  door_key TEXT NOT NULL, -- 'male', 'female', 'disabled_m', 'disabled_f', 'shower_m', 'shower_f'
+  door_key TEXT NOT NULL, -- e.g. 'male', 'female', or any custom room name like 'family_room'
   price_kes INTEGER NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT true,
   UNIQUE (site_id, door_key)
 );
 
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   door_id INTEGER NOT NULL REFERENCES doors(id) ON DELETE CASCADE,
   phone TEXT NOT NULL,
+  amount_kes INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending', -- pending -> paid
   otp TEXT,
   otp_expires_at TIMESTAMPTZ,
