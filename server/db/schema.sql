@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS nfc_tag_sites (
   PRIMARY KEY (tag_id, site_id)
 );
 
+-- Additional staff logins under a client account. Same permissions as the client
+-- owner (full access to that client's sites/tags/finance) — not a restricted role.
+CREATE TABLE IF NOT EXISTS client_staff (
+  id SERIAL PRIMARY KEY,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_transactions_reference ON transactions(reference);
 CREATE INDEX IF NOT EXISTS idx_transactions_site_door_otp ON transactions(site_id, door_id, otp);
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
