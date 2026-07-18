@@ -176,7 +176,7 @@ app.post("/sites", requireAuth, async (req, res) => {
   const clientId = resolveClientId(req);
   if (!clientId) return res.status(400).json({ error: "clientId is required (super admin: pass ?clientId=)" });
 
-  const { name, doors } = req.body;
+  const { name, doors, address, latitude, longitude } = req.body;
   if (!name || !doors || typeof doors !== "object" || Object.keys(doors).length === 0) {
     return res.status(400).json({ error: "name and a non-empty doors object (doorKey -> price) are required" });
   }
@@ -186,8 +186,8 @@ app.post("/sites", requireAuth, async (req, res) => {
     await client.query("BEGIN");
     const siteKey = generateSiteKey();
     const siteResult = await client.query(
-      "INSERT INTO sites (client_id, name, site_key) VALUES ($1, $2, $3) RETURNING *",
-      [clientId, name, siteKey]
+      "INSERT INTO sites (client_id, name, site_key, address, latitude, longitude) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+      [clientId, name, siteKey, address || null, latitude || null, longitude || null]
     );
     const site = siteResult.rows[0];
 
@@ -212,7 +212,7 @@ app.post("/sites", requireAuth, async (req, res) => {
 app.patch("/sites/:id", requireAuth, async (req, res) => {
   const clientId = resolveClientId(req);
   const siteId = parseInt(req.params.id, 10);
-  const { name, doors, removeDoors } = req.body;
+  const { name, doors, removeDoors, address, latitude, longitude } = req.body;
 
   const client = await pool.connect();
   try {
@@ -227,6 +227,12 @@ app.patch("/sites/:id", requireAuth, async (req, res) => {
 
     if (name) {
       await client.query("UPDATE sites SET name = $1 WHERE id = $2", [name, siteId]);
+    }
+    if (address !== undefined || latitude !== undefined || longitude !== undefined) {
+      await client.query(
+        "UPDATE sites SET address = COALESCE($1, address), latitude = COALESCE($2, latitude), longitude = COALESCE($3, longitude) WHERE id = $4",
+        [address || null, latitude ?? null, longitude ?? null, siteId]
+      );
     }
 
     if (doors && typeof doors === "object") {
@@ -533,7 +539,7 @@ app.get("/transactions", requireSiteKey(pool), async (req, res) => {
     const result = await pool.query(
       `SELECT t.reference, d.door_key, t.phone, t.status, t.otp, t.otp_expires_at, t.used, t.created_at
        FROM transactions t JOIN doors d ON d.id = t.door_id
-       WHERE t.site_id = $1
+       WHERE t.site_id = $1 AND t.created_at >= CURRENT_DATE
        ORDER BY t.created_at DESC LIMIT 50`,
       [req.site.id]
     );
@@ -652,6 +658,120 @@ app.delete("/staff/:id", requireAuth, async (req, res) => {
     res.json({ message: "Staff account deactivated" });
   } catch (err) {
     console.error("Deactivate staff error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// =====================================================================
+// PUBLIC: customer-facing nearby search + pay-in-advance (no auth — this is
+// the point, anyone can browse sites and pay for themselves before arriving)
+// =====================================================================
+
+app.get("/public/sites/nearby", async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const radiusKm = parseFloat(req.query.radiusKm) || 10;
+
+  if (isNaN(lat) || isNaN(lng)) {
+    return res.status(400).json({ error: "lat and lng query params are required" });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT id, name, address, latitude, longitude,
+              (6371 * acos(
+                 LEAST(1, cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2))
+                 + sin(radians($1)) * sin(radians(latitude)))
+              )) AS distance_km
+       FROM sites
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+       HAVING (6371 * acos(
+                 LEAST(1, cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2))
+                 + sin(radians($1)) * sin(radians(latitude)))
+              )) <= $3
+       ORDER BY distance_km ASC
+       LIMIT 50`,
+      [lat, lng, radiusKm]
+    );
+
+    const sites = result.rows;
+    for (const site of sites) {
+      const doorsResult = await pool.query(
+        "SELECT door_key, price_kes FROM doors WHERE site_id = $1 AND active = true",
+        [site.id]
+      );
+      site.doors = doorsResult.rows.reduce((acc, d) => ({ ...acc, [d.door_key]: d.price_kes }), {});
+      site.distance_km = Math.round(site.distance_km * 10) / 10;
+    }
+    res.json(sites);
+  } catch (err) {
+    console.error("Nearby sites error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.post("/public/charge", async (req, res) => {
+  const { siteId, doorKey, phone, email } = req.body;
+  if (!siteId || !doorKey || !phone) {
+    return res.status(400).json({ error: "siteId, doorKey and phone are required" });
+  }
+
+  const normalizedPhone = normalizeKenyanPhone(phone);
+  if (!normalizedPhone) {
+    return res.status(400).json({ error: "Could not parse phone number" });
+  }
+
+  try {
+    const doorResult = await pool.query(
+      "SELECT * FROM doors WHERE site_id = $1 AND door_key = $2 AND active = true",
+      [siteId, doorKey]
+    );
+    const door = doorResult.rows[0];
+    if (!door) return res.status(400).json({ error: "Unknown or inactive door for this site" });
+
+    const reference = generateReference();
+
+    const paystackRes = await fetch("https://api.paystack.co/charge", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: email || "info@vintechafrica.com",
+        amount: door.price_kes * 100,
+        currency: "KES",
+        reference,
+        mobile_money: { phone: normalizedPhone, provider: "mpesa" },
+      }),
+    });
+    const data = await paystackRes.json();
+
+    if (!data.status) {
+      return res.status(400).json({ error: data.message || "Charge initiation failed" });
+    }
+
+    await pool.query(
+      "INSERT INTO transactions (reference, site_id, door_id, phone, amount_kes, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+      [reference, siteId, door.id, normalizedPhone, door.price_kes]
+    );
+
+    res.json({ message: "STK push sent", reference, paystackStatus: data.data.status });
+  } catch (err) {
+    console.error("Public charge error:", err);
+    res.status(500).json({ error: "Failed to initiate charge" });
+  }
+});
+
+// The reference itself acts as a capability token — only someone who has it
+// (the customer who just paid) can poll this, so no further auth is needed.
+app.get("/public/transactions/:reference", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT status, otp, otp_expires_at, used FROM transactions WHERE reference = $1",
+      [req.params.reference]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Not found" });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Public transaction status error:", err);
     res.status(500).json({ error: "Internal error" });
   }
 });
