@@ -416,6 +416,7 @@ app.post("/charge", requireSiteKey(pool), async (req, res) => {
     const data = await paystackRes.json();
 
     if (!data.status) {
+      console.error("Paystack charge rejected:", JSON.stringify(data));
       return res.status(400).json({ error: data.message || "Charge initiation failed" });
     }
 
@@ -772,6 +773,7 @@ app.post("/public/charge", async (req, res) => {
     const data = await paystackRes.json();
 
     if (!data.status) {
+      console.error("Paystack charge rejected:", JSON.stringify(data));
       return res.status(400).json({ error: data.message || "Charge initiation failed" });
     }
 
