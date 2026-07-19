@@ -789,6 +789,36 @@ app.post("/public/charge", async (req, res) => {
   }
 });
 
+// Public version of the phone lookup, for the customer app (which has no
+// site-key or login at all). Same safety model: only returns results for
+// the exact phone number given, across all sites, never a browsable list.
+// IMPORTANT: this must be registered BEFORE /public/transactions/:reference
+// below, or Express matches "by-phone" as if it were a :reference value.
+app.get("/public/transactions/by-phone", async (req, res) => {
+  const { phone } = req.query;
+  if (!phone) return res.status(400).json({ error: "phone is required" });
+
+  const normalizedPhone = normalizeKenyanPhone(phone);
+  if (!normalizedPhone) return res.status(400).json({ error: "Could not parse phone number" });
+
+  try {
+    const result = await pool.query(
+      `SELECT t.reference, s.name AS site_name, d.door_key, t.status, t.otp, t.otp_expires_at, t.used, t.created_at
+       FROM transactions t
+       JOIN sites s ON s.id = t.site_id
+       JOIN doors d ON d.id = t.door_id
+       WHERE t.phone = $1 AND t.created_at > now() - interval '24 hours'
+       ORDER BY t.created_at DESC
+       LIMIT 10`,
+      [normalizedPhone]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Public phone lookup error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 // The reference itself acts as a capability token — only someone who has it
 // (the customer who just paid) can poll this, so no further auth is needed.
 app.get("/public/transactions/:reference", async (req, res) => {
@@ -828,34 +858,6 @@ app.get("/transactions/lookup", requireSiteKey(pool), async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error("Phone lookup error:", err);
-    res.status(500).json({ error: "Internal error" });
-  }
-});
-
-// Public version of the phone lookup, for the customer app (which has no
-// site-key or login at all). Same safety model: only returns results for
-// the exact phone number given, across all sites, never a browsable list.
-app.get("/public/transactions/by-phone", async (req, res) => {
-  const { phone } = req.query;
-  if (!phone) return res.status(400).json({ error: "phone is required" });
-
-  const normalizedPhone = normalizeKenyanPhone(phone);
-  if (!normalizedPhone) return res.status(400).json({ error: "Could not parse phone number" });
-
-  try {
-    const result = await pool.query(
-      `SELECT t.reference, s.name AS site_name, d.door_key, t.status, t.otp, t.otp_expires_at, t.used, t.created_at
-       FROM transactions t
-       JOIN sites s ON s.id = t.site_id
-       JOIN doors d ON d.id = t.door_id
-       WHERE t.phone = $1 AND t.created_at > now() - interval '24 hours'
-       ORDER BY t.created_at DESC
-       LIMIT 10`,
-      [normalizedPhone]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("Public phone lookup error:", err);
     res.status(500).json({ error: "Internal error" });
   }
 });
