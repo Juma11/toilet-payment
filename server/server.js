@@ -295,12 +295,72 @@ app.post("/admin/clients", requireAuth, requireSuperAdmin, async (req, res) => {
 
 app.get("/admin/clients", requireAuth, requireSuperAdmin, async (req, res) => {
   const result = await pool.query(
-    `SELECT c.id, c.name, c.email, c.role, c.created_at, COUNT(s.id) AS site_count
+    `SELECT c.id, c.name, c.email, c.role, c.created_at, c.paystack_subaccount_code, c.payout_percentage,
+            COUNT(s.id) AS site_count
      FROM clients c LEFT JOIN sites s ON s.client_id = c.id
      WHERE c.role = 'client_admin'
      GROUP BY c.id ORDER BY c.created_at DESC`
   );
   res.json(result.rows);
+});
+
+// Lists Kenyan banks/mobile-money payout options from Paystack, so the
+// dashboard can offer a real dropdown instead of a free-text bank code.
+app.get("/admin/banks", requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const response = await fetch("https://api.paystack.co/bank?currency=KES", {
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+    });
+    const data = await response.json();
+    if (!data.status) return res.status(400).json({ error: data.message || "Could not fetch banks" });
+    res.json(data.data.map((b) => ({ name: b.name, code: b.code })));
+  } catch (err) {
+    console.error("List banks error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// Creates a real Paystack subaccount for this client — from here on, any
+// charge for one of their sites automatically splits: their share pays out
+// straight to this bank account, and payoutPercentage stays with the main
+// account. No Paystack dashboard interaction needed, it's all API-driven.
+app.post("/admin/clients/:id/subaccount", requireAuth, requireSuperAdmin, async (req, res) => {
+  const { businessName, bankCode, accountNumber, payoutPercentage } = req.body;
+  if (!businessName || !bankCode || !accountNumber || payoutPercentage === undefined) {
+    return res.status(400).json({ error: "businessName, bankCode, accountNumber, and payoutPercentage are required" });
+  }
+
+  try {
+    const paystackRes = await fetch("https://api.paystack.co/subaccount", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        business_name: businessName,
+        bank_code: bankCode,
+        account_number: accountNumber,
+        percentage_charge: payoutPercentage, // the % that stays with the MAIN account, per Paystack's convention
+      }),
+    });
+    const data = await paystackRes.json();
+
+    if (!data.status) {
+      return res.status(400).json({ error: data.message || "Could not create subaccount" });
+    }
+
+    const subaccountCode = data.data.subaccount_code;
+    await pool.query(
+      "UPDATE clients SET paystack_subaccount_code = $1, payout_percentage = $2 WHERE id = $3",
+      [subaccountCode, payoutPercentage, req.params.id]
+    );
+
+    res.json({ subaccountCode, accountName: data.data.account_name });
+  } catch (err) {
+    console.error("Create subaccount error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
 });
 
 // Global installer PIN — same value works to set up any reception device
@@ -547,6 +607,19 @@ app.delete("/nfc-tags/:uid", requireAuth, async (req, res) => {
 // DEVICE-FACING: reception app + ESP32 doors (authenticated via x-site-key)
 // =====================================================================
 
+// Looks up the Paystack subaccount code for whichever client owns this site,
+// so a charge can automatically split — client's share pays out directly to
+// their own bank account, main account keeps its cut, no manual payout needed.
+async function getSubaccountForSite(siteId) {
+  const result = await pool.query(
+    `SELECT c.paystack_subaccount_code FROM sites s
+     JOIN clients c ON c.id = s.client_id
+     WHERE s.id = $1`,
+    [siteId]
+  );
+  return result.rows[0]?.paystack_subaccount_code || null;
+}
+
 app.post("/charge", chargeLimiter, requireSiteKey(pool), async (req, res) => {
   const { doorKey, phone, email } = req.body;
   const site = req.site;
@@ -566,17 +639,21 @@ app.post("/charge", chargeLimiter, requireSiteKey(pool), async (req, res) => {
     if (!door) return res.status(400).json({ error: `Unknown doorKey '${doorKey}' for this site` });
 
     const reference = generateReference();
+    const subaccountCode = await getSubaccountForSite(site.id);
+
+    const chargeBody = {
+      email: email || "info@vintechafrica.com",
+      amount: door.price_kes * 100,
+      currency: "KES",
+      reference,
+      mobile_money: { phone: normalizedPhone, provider: "mpesa" },
+    };
+    if (subaccountCode) chargeBody.subaccount = subaccountCode;
 
     const paystackRes = await fetch("https://api.paystack.co/charge", {
       method: "POST",
       headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: email || "info@vintechafrica.com",
-        amount: door.price_kes * 100,
-        currency: "KES",
-        reference,
-        mobile_money: { phone: normalizedPhone, provider: "mpesa" },
-      }),
+      body: JSON.stringify(chargeBody),
     });
     const data = await paystackRes.json();
 
@@ -945,17 +1022,21 @@ app.post("/public/charge", chargeLimiter, async (req, res) => {
     if (!door) return res.status(400).json({ error: "Unknown or inactive door for this site" });
 
     const reference = generateReference();
+    const subaccountCode = await getSubaccountForSite(siteId);
+
+    const chargeBody = {
+      email: email || "info@vintechafrica.com",
+      amount: door.price_kes * 100,
+      currency: "KES",
+      reference,
+      mobile_money: { phone: normalizedPhone, provider: "mpesa" },
+    };
+    if (subaccountCode) chargeBody.subaccount = subaccountCode;
 
     const paystackRes = await fetch("https://api.paystack.co/charge", {
       method: "POST",
       headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: email || "info@vintechafrica.com",
-        amount: door.price_kes * 100,
-        currency: "KES",
-        reference,
-        mobile_money: { phone: normalizedPhone, provider: "mpesa" },
-      }),
+      body: JSON.stringify(chargeBody),
     });
     const data = await paystackRes.json();
 
