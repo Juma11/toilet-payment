@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS client_staff (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Single-row table for global system settings, starting with the
+-- installer PIN used to authorize new reception device setup. Managed by
+-- the super admin via the dashboard, not by editing .env on the server.
+CREATE TABLE IF NOT EXISTS system_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  installer_pin TEXT NOT NULL,
+  CONSTRAINT single_row CHECK (id = 1)
+);
+
 CREATE INDEX IF NOT EXISTS idx_transactions_reference ON transactions(reference);
 CREATE INDEX IF NOT EXISTS idx_transactions_site_door_otp ON transactions(site_id, door_id, otp);
 CREATE INDEX IF NOT EXISTS idx_sites_client ON sites(client_id);
