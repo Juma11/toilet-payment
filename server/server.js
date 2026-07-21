@@ -51,6 +51,7 @@ const {
 } = require("./auth");
 
 const app = express();
+app.set("trust proxy", 1); // behind Nginx — needed so express-rate-limit sees the real client IP
 app.use(cors());
 
 // Public endpoints have no login and no site-key secrecy protecting them from
@@ -111,9 +112,45 @@ function normalizeKenyanPhone(raw) {
   return null;
 }
 
-// Stub — replace with Africa's Talking / Twilio
+// Sends via Africa's Talking. Falls back to console logging if credentials
+// aren't set, so local/dev testing still works without real SMS costs.
 async function sendSms(phone, message) {
-  console.log(`[SMS -> ${phone}]: ${message}`);
+  const username = process.env.AT_USERNAME;
+  const apiKey = process.env.AT_API_KEY;
+
+  console.log(`[SMS -> ${phone}]: ${message}`); // always log, useful for debugging even when real SMS also sends
+
+  if (!username || !apiKey) {
+    console.warn("[SMS] AT_USERNAME/AT_API_KEY not set — SMS not actually sent, logged only.");
+    return;
+  }
+
+  const baseUrl = username === "sandbox"
+    ? "https://api.sandbox.africastalking.com/version1/messaging"
+    : "https://api.africastalking.com/version1/messaging";
+
+  try {
+    const params = new URLSearchParams({ username, to: phone, message });
+    if (process.env.AT_SENDER_ID) params.set("from", process.env.AT_SENDER_ID);
+
+    const res = await fetch(baseUrl, {
+      method: "POST",
+      headers: {
+        apiKey,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: params.toString(),
+    });
+
+    const data = await res.json();
+    const recipient = data?.SMSMessageData?.Recipients?.[0];
+    if (recipient && recipient.status !== "Success") {
+      console.error(`[SMS] Africa's Talking rejected message to ${phone}:`, recipient.status);
+    }
+  } catch (err) {
+    console.error("[SMS] Africa's Talking request failed:", err.message);
+  }
 }
 
 // =====================================================================
