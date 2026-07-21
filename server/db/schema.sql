@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS clients (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'client_admin' CHECK (role IN ('super_admin', 'client_admin')),
+  paystack_subaccount_code TEXT,
+  payout_percentage NUMERIC,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
