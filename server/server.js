@@ -552,6 +552,24 @@ app.get("/site-sync", requireSiteKey(pool), async (req, res) => {
   }
 });
 
+// One-time device binding step — requires a technician PIN on top of the
+// site key, so only someone who knows the installer PIN can connect a new
+// reception device to a site. Once bound, the device only needs its site
+// key for everyday use (see /site-info below) — no PIN required again.
+app.post("/device-setup", requireSiteKey(pool), async (req, res) => {
+  const { installerPin } = req.body;
+  const expectedPin = process.env.INSTALLER_PIN;
+
+  if (!expectedPin) {
+    return res.status(500).json({ error: "Installer PIN not configured on server" });
+  }
+  if (installerPin !== expectedPin) {
+    return res.status(401).json({ error: "Incorrect technician PIN" });
+  }
+
+  res.json({ ok: true, siteName: req.site.name });
+});
+
 app.get("/site-info", requireSiteKey(pool), async (req, res) => {
   try {
     const doorsResult = await pool.query("SELECT door_key, price_kes FROM doors WHERE site_id = $1 AND active = true", [req.site.id]);
