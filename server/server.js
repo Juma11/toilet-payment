@@ -1095,4 +1095,26 @@ async function pollPendingTransactions() {
 
 setInterval(pollPendingTransactions, 20000); // check every 20 seconds
 
+// =====================================================================
+// CLEANUP: remove old abandoned transactions
+// Only ever deletes PENDING ones (STK push sent, customer never paid) —
+// paid transactions are kept forever as financial/revenue history and are
+// never touched by this job.
+// =====================================================================
+async function cleanupOldTransactions() {
+  try {
+    const result = await pool.query(
+      "DELETE FROM transactions WHERE status = 'pending' AND created_at < now() - interval '24 hours'"
+    );
+    if (result.rowCount > 0) {
+      console.log(`[cleanup] Removed ${result.rowCount} abandoned pending transaction(s) older than 24h`);
+    }
+  } catch (err) {
+    console.error("[cleanup] Error removing old transactions:", err.message);
+  }
+}
+
+setInterval(cleanupOldTransactions, 6 * 60 * 60 * 1000); // every 6 hours
+cleanupOldTransactions(); // also run once at startup
+
 app.listen(PORT, () => console.log(`Toilet payment server running on port ${PORT}`));
