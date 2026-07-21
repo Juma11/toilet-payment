@@ -34,6 +34,7 @@
 
 require("dotenv").config();
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const cors = require("cors");
 const crypto = require("crypto");
 const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -51,6 +52,33 @@ const {
 
 const app = express();
 app.use(cors());
+
+// Public endpoints have no login and no site-key secrecy protecting them from
+// randoms on the internet — these limits keep them usable for real customers
+// while blocking someone from hammering STK pushes or brute-forcing phone
+// numbers against the lookup endpoints.
+const chargeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: "Too many payment attempts from this device. Please wait a few minutes and try again." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const lookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  message: { error: "Too many lookup attempts. Please wait a few minutes and try again." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const generalPublicLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: "Too many requests. Please slow down." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; },
 }));
@@ -412,7 +440,7 @@ app.delete("/nfc-tags/:uid", requireAuth, async (req, res) => {
 // DEVICE-FACING: reception app + ESP32 doors (authenticated via x-site-key)
 // =====================================================================
 
-app.post("/charge", requireSiteKey(pool), async (req, res) => {
+app.post("/charge", chargeLimiter, requireSiteKey(pool), async (req, res) => {
   const { doorKey, phone, email } = req.body;
   const site = req.site;
 
@@ -586,7 +614,7 @@ app.get("/site-sync", requireSiteKey(pool), async (req, res) => {
 // site key, so only someone who knows the installer PIN can connect a new
 // reception device to a site. Once bound, the device only needs its site
 // key for everyday use (see /site-info below) — no PIN required again.
-app.post("/device-setup", requireSiteKey(pool), async (req, res) => {
+app.post("/device-setup", lookupLimiter, requireSiteKey(pool), async (req, res) => {
   const { installerPin } = req.body;
 
   try {
@@ -748,7 +776,7 @@ app.delete("/staff/:id", requireAuth, async (req, res) => {
 // the point, anyone can browse sites and pay for themselves before arriving)
 // =====================================================================
 
-app.get("/public/sites/nearby", async (req, res) => {
+app.get("/public/sites/nearby", generalPublicLimiter, async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
   const radiusKm = parseFloat(req.query.radiusKm) || 10;
@@ -790,7 +818,7 @@ app.get("/public/sites/nearby", async (req, res) => {
   }
 });
 
-app.post("/public/charge", async (req, res) => {
+app.post("/public/charge", chargeLimiter, async (req, res) => {
   const { siteId, doorKey, phone, email } = req.body;
   if (!siteId || !doorKey || !phone) {
     return res.status(400).json({ error: "siteId, doorKey and phone are required" });
@@ -846,7 +874,7 @@ app.post("/public/charge", async (req, res) => {
 // the exact phone number given, across all sites, never a browsable list.
 // IMPORTANT: this must be registered BEFORE /public/transactions/:reference
 // below, or Express matches "by-phone" as if it were a :reference value.
-app.get("/public/transactions/by-phone", async (req, res) => {
+app.get("/public/transactions/by-phone", lookupLimiter, async (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: "phone is required" });
 
@@ -873,7 +901,7 @@ app.get("/public/transactions/by-phone", async (req, res) => {
 
 // The reference itself acts as a capability token — only someone who has it
 // (the customer who just paid) can poll this, so no further auth is needed.
-app.get("/public/transactions/:reference", async (req, res) => {
+app.get("/public/transactions/:reference", generalPublicLimiter, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT status, otp, otp_expires_at, used FROM transactions WHERE reference = $1",
@@ -891,7 +919,7 @@ app.get("/public/transactions/:reference", async (req, res) => {
 // gives, unlike a browsable list. Safe for reception to use even though
 // it's site-key (not login) authenticated, since a stranger would need to
 // already know the exact phone number to retrieve anything.
-app.get("/transactions/lookup", requireSiteKey(pool), async (req, res) => {
+app.get("/transactions/lookup", lookupLimiter, requireSiteKey(pool), async (req, res) => {
   const { phone } = req.query;
   if (!phone) return res.status(400).json({ error: "phone is required" });
 
