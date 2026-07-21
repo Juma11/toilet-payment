@@ -162,6 +162,76 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
+// Self-service: change your own password while logged in. Requires the
+// current password, since no email/SMS delivery exists yet to verify
+// identity any other way for a "forgot password" flow.
+app.post("/auth/change-password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: "currentPassword and a newPassword (6+ chars) are required" });
+  }
+
+  try {
+    const table = req.user.role === "client_staff" ? "client_staff" : "clients";
+    const result = await pool.query(`SELECT * FROM ${table} WHERE id = $1`, [req.user.id]);
+    const account = result.rows[0];
+
+    if (!account || !(await comparePassword(currentPassword, account.password_hash))) {
+      return res.status(401).json({ error: "Current password is incorrect" });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await pool.query(`UPDATE ${table} SET password_hash = $1 WHERE id = $2`, [newHash, req.user.id]);
+    res.json({ message: "Password changed" });
+  } catch (err) {
+    console.error("Change password error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// Admin-triggered reset for someone actually locked out — super admin can
+// reset any client owner's password.
+app.put("/admin/clients/:id/reset-password", requireAuth, requireSuperAdmin, async (req, res) => {
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: "newPassword (6+ chars) is required" });
+  }
+  try {
+    const newHash = await hashPassword(newPassword);
+    const result = await pool.query(
+      "UPDATE clients SET password_hash = $1 WHERE id = $2 AND role = 'client_admin' RETURNING id",
+      [newHash, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Client not found" });
+    res.json({ message: "Password reset" });
+  } catch (err) {
+    console.error("Reset client password error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// Same idea, scoped to a client's own staff — a client_admin can reset
+// their own staff's password (or super admin can, via ?clientId=).
+app.put("/staff/:id/reset-password", requireAuth, async (req, res) => {
+  const clientId = resolveClientId(req);
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: "newPassword (6+ chars) is required" });
+  }
+  try {
+    const newHash = await hashPassword(newPassword);
+    const result = await pool.query(
+      "UPDATE client_staff SET password_hash = $1 WHERE id = $2 AND ($3::int IS NULL OR client_id = $3) RETURNING id",
+      [newHash, req.params.id, clientId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "Staff account not found" });
+    res.json({ message: "Password reset" });
+  } catch (err) {
+    console.error("Reset staff password error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 // =====================================================================
 // SUPER ADMIN: manage clients
 // =====================================================================
