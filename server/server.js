@@ -168,6 +168,36 @@ app.get("/admin/clients", requireAuth, requireSuperAdmin, async (req, res) => {
   res.json(result.rows);
 });
 
+// Global installer PIN — same value works to set up any reception device
+// across every site. Only the super admin can see or change it.
+app.get("/admin/installer-pin", requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT installer_pin FROM system_settings WHERE id = 1");
+    res.json({ installerPin: result.rows[0]?.installer_pin || null });
+  } catch (err) {
+    console.error("Get installer PIN error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.put("/admin/installer-pin", requireAuth, requireSuperAdmin, async (req, res) => {
+  const { installerPin } = req.body;
+  if (!installerPin || installerPin.length < 4) {
+    return res.status(400).json({ error: "PIN must be at least 4 characters" });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO system_settings (id, installer_pin) VALUES (1, $1)
+       ON CONFLICT (id) DO UPDATE SET installer_pin = $1`,
+      [installerPin]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Update installer PIN error:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
 // =====================================================================
 // CLIENT-SCOPED: sites
 // =====================================================================
@@ -558,16 +588,20 @@ app.get("/site-sync", requireSiteKey(pool), async (req, res) => {
 // key for everyday use (see /site-info below) — no PIN required again.
 app.post("/device-setup", requireSiteKey(pool), async (req, res) => {
   const { installerPin } = req.body;
-  const expectedPin = process.env.INSTALLER_PIN;
 
-  if (!expectedPin) {
-    return res.status(500).json({ error: "Installer PIN not configured on server" });
+  try {
+    const settingsResult = await pool.query("SELECT installer_pin FROM system_settings WHERE id = 1");
+    if (settingsResult.rows.length === 0) {
+      return res.status(500).json({ error: "Installer PIN not configured on server" });
+    }
+    if (installerPin !== settingsResult.rows[0].installer_pin) {
+      return res.status(401).json({ error: "Incorrect technician PIN" });
+    }
+    res.json({ ok: true, siteName: req.site.name });
+  } catch (err) {
+    console.error("Device setup PIN check error:", err);
+    res.status(500).json({ error: "Internal error" });
   }
-  if (installerPin !== expectedPin) {
-    return res.status(401).json({ error: "Incorrect technician PIN" });
-  }
-
-  res.json({ ok: true, siteName: req.site.name });
 });
 
 app.get("/site-info", requireSiteKey(pool), async (req, res) => {
